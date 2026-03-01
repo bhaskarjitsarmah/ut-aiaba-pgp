@@ -171,11 +171,12 @@ st.info(
     icon="ℹ️",
 )
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab_hnsw, tab5 = st.tabs([
     "📊 Pipeline Overview",
     "📄 Text Chunks",
     "🔢 Embeddings",
     "🗄️ ChromaDB Internals",
+    "🕸️ HNSW Explained",
     "🔍 Live Similarity Search",
 ])
 
@@ -601,3 +602,339 @@ with tab5:
 4. ⭐ = matched chunks (nearest neighbours in vector space)
 5. In the real notebook, these chunks are passed to **GPT-4o-mini** as context to generate a final answer
         """)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB HNSW — HNSW Explained
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab_hnsw:
+    st.subheader("HNSW: How Vector Search Stays Fast")
+
+    # ── Section 1: The Problem ────────────────────────────────────────────────
+    st.markdown("### The Problem — Finding Similar Vectors is Slow by Default")
+
+    col_bf, col_hnsw_intro = st.columns(2)
+    with col_bf:
+        st.markdown("**Brute-Force (Naive) Approach**")
+        st.code(
+            "compare query → chunk_001  ✓\n"
+            "compare query → chunk_002  ✓\n"
+            "compare query → chunk_003  ✓\n"
+            "...  9,997 more comparisons ...\n"
+            "= 10,000 total  🐢  Slow!",
+            language="text",
+        )
+    with col_hnsw_intro:
+        st.markdown("**HNSW Approach**")
+        st.code(
+            "Enter top layer  →  jump to nearby node  ⚡\n"
+            "Drop to middle layer  →  navigate closer  ⚡\n"
+            "Drop to bottom layer  →  pinpoint result  ⚡\n"
+            "= ~50 total  🚀  Fast!",
+            language="text",
+        )
+
+    fig_speed = px.bar(
+        pd.DataFrame({
+            "Method": ["Brute Force", "HNSW"],
+            "Comparisons": [10000, 55],
+        }),
+        x="Method", y="Comparisons", color="Method",
+        color_discrete_map={"Brute Force": "#E74C3C", "HNSW": "#27AE60"},
+        title="Comparisons needed to find top-3 results among 10,000 vectors",
+        text="Comparisons",
+        height=280,
+    )
+    fig_speed.update_traces(textposition="outside")
+    fig_speed.update_layout(showlegend=False, yaxis_title="Number of comparisons")
+    st.plotly_chart(fig_speed, use_container_width=True)
+
+    st.divider()
+
+    # ── Section 2: The Small World idea ──────────────────────────────────────
+    st.markdown("### The Idea — 'Small World' Networks")
+    st.markdown(
+        "The name comes from **network theory** — like the *six degrees of separation* idea. "
+        "In a small-world graph, **any node can reach any other node in very few hops**, "
+        "even though each node only connects to a small number of neighbours. "
+        "HNSW builds this kind of graph over your vectors."
+    )
+
+    st.divider()
+
+    # ── Section 3: Multi-layer graph ─────────────────────────────────────────
+    st.markdown("### The Structure — Multiple Layers of Graphs")
+    st.caption(
+        "Upper layers are sparse (few nodes, long-range jumps for fast navigation). "
+        "Lower layers are dense (all nodes, short-range links for precise search)."
+    )
+
+    # Node layout
+    node_x = {
+        "c01": 0.5, "c02": 1.5, "c03": 2.5, "c04": 3.5,
+        "c05": 4.5, "c06": 5.5, "c07": 6.5,
+        "c08": 7.5, "c09": 8.5, "c10": 9.5,
+    }
+    layer_y    = {2: 4.2, 1: 2.1, 0: 0.0}
+    layer_nodes = {
+        2: ["c01", "c05", "c08"],
+        1: ["c01", "c03", "c05", "c07", "c08", "c10"],
+        0: ["c01","c02","c03","c04","c05","c06","c07","c08","c09","c10"],
+    }
+    layer_edges = {
+        2: [("c01","c05"), ("c05","c08")],
+        1: [("c01","c03"),("c03","c05"),("c05","c07"),("c07","c08"),("c08","c10"),("c01","c08")],
+        0: [("c01","c02"),("c02","c03"),("c03","c04"),("c04","c05"),("c05","c06"),
+            ("c06","c07"),("c07","c08"),("c08","c09"),("c09","c10"),
+            ("c01","c03"),("c03","c05"),("c05","c07"),("c07","c09"),
+            ("c02","c04"),("c04","c06"),("c06","c08"),("c08","c10")],
+    }
+    layer_bg   = {2: "#FFF8E1", 1: "#E8F5E9", 0: "#E3F2FD"}
+    layer_label= {2: "Layer 2  (sparse — long jumps)", 1: "Layer 1  (medium)", 0: "Layer 0  (dense — all nodes)"}
+    node_topic = {c["id"]: c["topic"] for c in CHUNKS}
+
+    fig_layers = go.Figure()
+
+    # Background bands per layer
+    for layer, y in layer_y.items():
+        fig_layers.add_shape(
+            type="rect", x0=-0.3, y0=y-0.7, x1=10.3, y1=y+0.7,
+            fillcolor=layer_bg[layer], opacity=0.6, line_color="#ccc", line_width=1,
+        )
+        fig_layers.add_annotation(
+            x=-0.2, y=y, text=layer_label[layer],
+            showarrow=False, font=dict(size=11, color="#555"), xanchor="right",
+        )
+
+    # Horizontal edges within each layer
+    for layer, edges in layer_edges.items():
+        y = layer_y[layer]
+        dash = "dot" if layer == 2 else "solid"
+        width = 1.5 if layer == 2 else 1
+        for n1, n2 in edges:
+            fig_layers.add_shape(
+                type="line",
+                x0=node_x[n1], y0=y, x1=node_x[n2], y1=y,
+                line=dict(color="#aaa", width=width, dash=dash),
+            )
+
+    # Vertical "elevator" lines (node exists in multiple layers)
+    for node in layer_nodes[2]:
+        fig_layers.add_shape(
+            type="line",
+            x0=node_x[node], y0=layer_y[2] - 0.7,
+            x1=node_x[node], y1=layer_y[1] + 0.7,
+            line=dict(color="#bbb", width=1, dash="dot"),
+        )
+    for node in layer_nodes[1]:
+        fig_layers.add_shape(
+            type="line",
+            x0=node_x[node], y0=layer_y[1] - 0.7,
+            x1=node_x[node], y1=layer_y[0] + 0.7,
+            line=dict(color="#bbb", width=1, dash="dot"),
+        )
+
+    # Nodes
+    for layer, nodes in layer_nodes.items():
+        y = layer_y[layer]
+        size = 20 if layer == 2 else 16 if layer == 1 else 12
+        for node in nodes:
+            color = TOPIC_COLORS[node_topic[node]]
+            chunk_text = next(c["text"][:50] for c in CHUNKS if c["id"] == node)
+            fig_layers.add_trace(go.Scatter(
+                x=[node_x[node]], y=[y],
+                mode="markers+text",
+                text=[node],
+                textposition="top center",
+                marker=dict(size=size, color=color, line=dict(color="white", width=2)),
+                hovertext=f"{node}: {chunk_text}…",
+                hoverinfo="text",
+                showlegend=False,
+            ))
+
+    fig_layers.update_layout(
+        height=440,
+        title="HNSW — Multi-Layer Graph (our 10 medical chunks)",
+        xaxis=dict(visible=False, range=[-2.5, 11]),
+        yaxis=dict(visible=False, range=[-0.9, 5.3]),
+        plot_bgcolor="white",
+        margin=dict(l=220, r=10, t=40, b=10),
+    )
+    st.plotly_chart(fig_layers, use_container_width=True)
+
+    c1, c2, c3 = st.columns(3)
+    c1.markdown("🔵 **Blue nodes** = Diabetes chunks")
+    c2.markdown("🟢 **Green nodes** = Hypertension chunks")
+    c3.markdown("🔴 **Red nodes** = Pulmonary Embolism chunks")
+
+    st.divider()
+
+    # ── Section 4: Search traversal ───────────────────────────────────────────
+    st.markdown("### How a Search Traverses the Layers")
+    st.caption(
+        'Example query: "How is blood pressure treated?" '
+        "→ answer lives near c05, c06, c07 (Hypertension chunks)"
+    )
+
+    # Search path: L2: enter c08 → move to c05 | L1: c05 → c07 | L0: c05,c06,c07 found
+    search_path = {
+        2: [("c08", "c05")],          # jump from entry c08 to closer c05
+        1: [("c05", "c07")],          # navigate to c07 region
+        0: [],                         # final result nodes: c05, c06, c07
+    }
+    final_results = {"c05", "c06", "c07"}
+    entry_node    = "c08"
+
+    fig_trav = go.Figure()
+
+    # Layer backgrounds (same as above)
+    for layer, y in layer_y.items():
+        fig_trav.add_shape(
+            type="rect", x0=-0.3, y0=y-0.7, x1=10.3, y1=y+0.7,
+            fillcolor=layer_bg[layer], opacity=0.6, line_color="#ccc", line_width=1,
+        )
+        fig_trav.add_annotation(
+            x=-0.2, y=y, text=layer_label[layer],
+            showarrow=False, font=dict(size=11, color="#555"), xanchor="right",
+        )
+
+    # Background edges (greyed out)
+    for layer, edges in layer_edges.items():
+        y = layer_y[layer]
+        for n1, n2 in edges:
+            fig_trav.add_shape(
+                type="line",
+                x0=node_x[n1], y0=y, x1=node_x[n2], y1=y,
+                line=dict(color="#ddd", width=1),
+            )
+
+    # Vertical elevator lines
+    for node in layer_nodes[2]:
+        fig_trav.add_shape(
+            type="line",
+            x0=node_x[node], y0=layer_y[2]-0.7, x1=node_x[node], y1=layer_y[1]+0.7,
+            line=dict(color="#ddd", width=1, dash="dot"),
+        )
+    for node in layer_nodes[1]:
+        fig_trav.add_shape(
+            type="line",
+            x0=node_x[node], y0=layer_y[1]-0.7, x1=node_x[node], y1=layer_y[0]+0.7,
+            line=dict(color="#ddd", width=1, dash="dot"),
+        )
+
+    # Search path arrows (horizontal jumps within layers)
+    arrow_colors = {2: "#E67E22", 1: "#8E44AD", 0: "#27AE60"}
+    step_labels  = {2: "① Coarse jump", 1: "② Mid-layer navigation", 0: "③ Fine search"}
+    for layer, moves in search_path.items():
+        y = layer_y[layer]
+        for (src, dst) in moves:
+            fig_trav.add_annotation(
+                x=node_x[dst], y=y,
+                ax=node_x[src], ay=y,
+                xref="x", yref="y", axref="x", ayref="y",
+                arrowhead=3, arrowsize=1.5, arrowwidth=2.5,
+                arrowcolor=arrow_colors[layer],
+                showarrow=True, text="",
+            )
+
+    # Drop-down arrows between layers
+    # L2 c05 → L1 c05
+    fig_trav.add_annotation(
+        x=node_x["c05"], y=layer_y[1]+0.7,
+        ax=node_x["c05"], ay=layer_y[2]-0.7,
+        xref="x", yref="y", axref="x", ayref="y",
+        arrowhead=3, arrowsize=1.5, arrowwidth=2, arrowcolor="#555",
+        showarrow=True, text="",
+    )
+    # L1 c07 → L0 c07
+    fig_trav.add_annotation(
+        x=node_x["c07"], y=layer_y[0]+0.7,
+        ax=node_x["c07"], ay=layer_y[1]-0.7,
+        xref="x", yref="y", axref="x", ayref="y",
+        arrowhead=3, arrowsize=1.5, arrowwidth=2, arrowcolor="#555",
+        showarrow=True, text="",
+    )
+
+    # Draw all nodes (dim non-involved ones)
+    for layer, nodes in layer_nodes.items():
+        y = layer_y[layer]
+        size = 20 if layer == 2 else 16 if layer == 1 else 12
+        for node in nodes:
+            is_entry  = (node == entry_node and layer == 2)
+            is_result = (node in final_results and layer == 0)
+            is_path   = (node in {"c05","c07","c08"})
+
+            if is_result:
+                color, outline, sz = TOPIC_COLORS[node_topic[node]], "gold", size + 6
+            elif is_entry:
+                color, outline, sz = TOPIC_COLORS[node_topic[node]], "#E74C3C", size + 4
+            elif is_path:
+                color, outline, sz = TOPIC_COLORS[node_topic[node]], "#555", size + 2
+            else:
+                color, outline, sz = "#ddd", "#bbb", size
+
+            chunk_text = next(c["text"][:50] for c in CHUNKS if c["id"] == node)
+            fig_trav.add_trace(go.Scatter(
+                x=[node_x[node]], y=[y],
+                mode="markers+text",
+                text=[node],
+                textposition="top center",
+                marker=dict(size=sz, color=color, line=dict(color=outline, width=2)),
+                hovertext=f"{node}: {chunk_text}…",
+                hoverinfo="text",
+                showlegend=False,
+            ))
+
+    # Entry label
+    fig_trav.add_annotation(
+        x=node_x[entry_node], y=layer_y[2]+0.75,
+        text="← Entry point", showarrow=False,
+        font=dict(size=11, color="#E74C3C"),
+    )
+
+    fig_trav.update_layout(
+        height=460,
+        title="Search traversal: 'How is blood pressure treated?'",
+        xaxis=dict(visible=False, range=[-2.5, 11]),
+        yaxis=dict(visible=False, range=[-0.9, 5.5]),
+        plot_bgcolor="white",
+        margin=dict(l=220, r=10, t=40, b=10),
+    )
+    st.plotly_chart(fig_trav, use_container_width=True)
+
+    # Step-by-step table
+    st.markdown("#### Step-by-step walkthrough")
+    st.markdown("""
+| Step | Layer | What happens |
+|------|-------|--------------|
+| ① | **Layer 2** (sparse) | Enter at a random node (`c08`). Compare with its few neighbours → jump to closer node `c05`. Only 2 comparisons! |
+| ↓  | **Drop down** | `c05` exists in Layer 1 too — descend to it |
+| ② | **Layer 1** (medium) | Start at `c05`. Navigate through neighbours → `c07` is even closer. ~4 comparisons |
+| ↓  | **Drop down** | `c07` exists in Layer 0 — descend to it |
+| ③ | **Layer 0** (dense) | Fine-grained search from `c07`. Check all immediate neighbours → `c05`, `c06`, `c07` are the top-3 |
+| ✅ | **Done!** | Return `c05`, `c06`, `c07` — Hypertension chunks — as the answer |
+    """)
+
+    st.divider()
+
+    # ── Section 5: Key properties ─────────────────────────────────────────────
+    st.markdown("### Why HNSW Works So Well")
+    p1, p2, p3 = st.columns(3)
+    with p1:
+        st.markdown("#### ⚡ Speed")
+        st.markdown(
+            "Search complexity is **O(log n)** — doubling the number of vectors "
+            "adds only one extra step, not double the work."
+        )
+    with p2:
+        st.markdown("#### 🎯 Accuracy")
+        st.markdown(
+            "HNSW is an **approximate** nearest-neighbour algorithm — it finds ~99% "
+            "of true nearest neighbours, trading a tiny bit of accuracy for massive speed gains."
+        )
+    with p3:
+        st.markdown("#### 💾 Memory")
+        st.markdown(
+            "Each node connects to only a small fixed number of neighbours (the `M` parameter), "
+            "keeping memory usage predictable even at millions of vectors."
+        )
