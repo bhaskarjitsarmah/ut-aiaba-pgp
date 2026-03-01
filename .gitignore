@@ -1,0 +1,12 @@
+# ChromaDB vector database folders (large binary files)
+medical_db/
+demo_medical_db/
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
